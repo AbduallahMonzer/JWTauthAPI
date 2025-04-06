@@ -1,124 +1,201 @@
-using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
-using System.Text;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens;
+using Microsoft.Extensions.Configuration;
+using Npgsql;
+using System;
+using System.Collections.Generic;
 using JwtAuthApi.Models;
-using Microsoft.Extensions.Options;
 
-namespace JwtAuthApi.Controllers;
-
-[ApiController]
-[Route("api/[controller]")]
-public class UserController : ControllerBase
+namespace JwtAuthApi.Controllers
 {
-    private readonly AppDbContext _context;
-    private readonly JwtSettings _jwtSettings;
-
-    public UserController(AppDbContext context, IOptions<JwtSettings> jwtSettings)
+    [ApiController]
+    [Route("api")]
+    public class UserController : ControllerBase
     {
-        _context = context;
-        _jwtSettings = jwtSettings.Value;
+        private readonly string _connectionString;
 
-        // Validate configuration
-        if (string.IsNullOrEmpty(_jwtSettings.SecretKey))
+        public UserController(IConfiguration configuration)
         {
-            throw new InvalidOperationException("JWT Secret Key is not configured");
+            _connectionString = configuration.GetConnectionString("DefaultConnection")
+            ?? throw new InvalidOperationException("Missing DB connection string");
         }
-    }
 
-    [Authorize]
-    [HttpGet("list_users")]
-    public async Task<IActionResult> ListUsers()
-    {
-        var users = await _context.Users.ToListAsync();
-        return Ok(users);
-    }
-
-    [Authorize]
+        // POST: api/new - Complete user profile
     [HttpPost("new")]
-    public async Task<IActionResult> CreateUser([FromBody] User user)
+public IActionResult CompleteUserProfile([FromBody] User user)
+{
+    if (user == null || string.IsNullOrEmpty(user.Username) 
+        || string.IsNullOrEmpty(user.Password))
     {
-        if (user == null)
-            return BadRequest("User object is required");
-
-        // Validate required fields
-        if (string.IsNullOrEmpty(user.Email))
-            return BadRequest("Email is required");
-
-        _context.Users.Add(user);
-        await _context.SaveChangesAsync();
-
-        return Ok(user);
+        return BadRequest("Username and Password are required");
     }
 
-    [Authorize]
-    [HttpPost("update")]
-    public async Task<IActionResult> UpdateUser([FromBody] User user)
+    NpgsqlConnection? conn = null;
+    try
     {
-        if (user == null || user.Id == 0)
-            return BadRequest("Valid user ID is required");
+        conn = new NpgsqlConnection(_connectionString);
+        conn.Open();
 
-        var existingUser = await _context.Users.FindAsync(user.Id);
-        if (existingUser == null)
-            return NotFound("User not found");
+        var checkCmd = new NpgsqlCommand(
+            @"SELECT COUNT(*) FROM user_account 
+            WHERE username = @username",
+            conn);
+        checkCmd.Parameters.AddWithValue("username", user.Username);
+        long? userCount = checkCmd.ExecuteScalar() as long?;
 
-        // Update properties
-        if (!string.IsNullOrEmpty(user.Email))
-            existingUser.Email = user.Email;
-            
-        if (!string.IsNullOrEmpty(user.FullName))
-            existingUser.FullName = user.FullName;
-            
-        if (!string.IsNullOrEmpty(user.PhoneNumber))
-            existingUser.PhoneNumber = user.PhoneNumber;
-
-        await _context.SaveChangesAsync();
-
-        return Ok(existingUser);
-    }
-
-    [HttpPost("refresh_token")]
-    [Authorize]
-    public IActionResult RefreshToken()
-    {
-        var userEmail = User.FindFirst(ClaimTypes.Email)?.Value;
-        if (string.IsNullOrEmpty(userEmail))
-            return Unauthorized("Invalid token claims");
-
-        var token = GenerateJwtToken(userEmail);
-        Response.Cookies.Append("jwt", token, new CookieOptions
+        if (userCount == 0)
         {
-            HttpOnly = true,
-            Secure = true,
-            SameSite = SameSiteMode.Strict,
-            Expires = DateTimeOffset.UtcNow.AddHours(3) // Match token expiration
+            return NotFound("User not found. Please sign up first.");
+        }
+
+        var updateCmd = new NpgsqlCommand(
+            @"UPDATE user_account SET
+            password = @password, 
+            email = @email,
+            phone_number = @phone_number,
+            role = @role
+            WHERE username = @username", conn);
+        updateCmd.Parameters.AddWithValue("password", 
+            string.IsNullOrEmpty(user.Password) ? DBNull.Value : (object)user.Password!);
+        updateCmd.Parameters.AddWithValue("email", 
+            string.IsNullOrEmpty(user.Email) ? DBNull.Value : (object)user.Email!);
+        updateCmd.Parameters.AddWithValue("phone_number",   
+            string.IsNullOrEmpty(user.PhoneNumber) ? DBNull.Value : (object)user.PhoneNumber!);
+        updateCmd.Parameters.AddWithValue("role", 
+            string.IsNullOrEmpty(user.Role) ? DBNull.Value : (object)user.Role!);
+        updateCmd.Parameters.AddWithValue("username", user.Username);
+
+        int rowsAffected = updateCmd.ExecuteNonQuery();
+        if (rowsAffected == 0)
+        {
+            return StatusCode(500, "Failed to update user profile.");
+        }
+
+        return Ok(new
+        {
+            Message = "User profile updated successfully.",
+            Username = user.Username,
+            Email = user.Email,
+            PhoneNumber = user.PhoneNumber,
+            Role = user.Role
         });
-
-        return Ok(new { message = "Token refreshed successfully" });
     }
-
-    private string GenerateJwtToken(string email)
+    catch (Exception ex)
     {
-        var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtSettings.SecretKey));
-        var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
+        return StatusCode(500, $"Internal server error: {ex.Message}");
+    }
+    finally
+    {
+        conn?.Close();
+    }
+}
 
-        var claims = new[]
+
+        // GET: api/list_users - Get all users
+        [HttpGet("list_users")]
+        public IActionResult GetUsers()
         {
-            new Claim(ClaimTypes.Email, email),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
-            // Add other claims as needed
-        };
+            NpgsqlConnection? conn = null;
+            try
+            {
+                conn = new NpgsqlConnection(_connectionString);
+                conn.Open();
 
-        var token = new JwtSecurityToken(
-            issuer: _jwtSettings.Issuer,
-            audience: _jwtSettings.Audience,
-            claims: claims,
-            expires: DateTime.UtcNow.AddHours(3),
-            signingCredentials: credentials);
+                var cmd = new NpgsqlCommand(@"SELECT id, 
+                username,
+                email,
+                phone_number,
+                role
+                FROM user_account", conn);
+                var reader = cmd.ExecuteReader();
 
-        return new JwtSecurityTokenHandler().WriteToken(token);
+                var users = new List<User>();
+
+                while (reader.Read())
+                {
+                    users.Add(new User
+                    {
+                        Id = reader.GetInt32(0),
+                        Username = reader.GetString(1),
+                        Email = reader.IsDBNull(2) ? null : reader.GetString(2),
+                        PhoneNumber = reader.IsDBNull(3) ? null : reader.GetString(3),
+                        Role = reader.IsDBNull(4) ? null : reader.GetString(4)
+                    });
+                }
+
+                return Ok(users);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+            finally
+            {
+                if (conn != null)
+                    conn.Close();
+            }
+        }
+
+        // POST: api/update - we will use in OAuth
+        /* [HttpPost("update")]
+        public IActionResult UpdateUser([FromBody] User user)
+        {
+            if (user == null || user.Id <= 0)
+            {
+                return BadRequest("User ID is required for update");
+            }
+            NpgsqlConnection? conn = null;
+            try
+            {
+                conn = new NpgsqlConnection(_connectionString);
+                conn.Open();
+
+                var query = @"UPDATE user_account SET
+                    username = @username,
+                    email = @email,
+                    phone_number = @phone_number,
+                    role = @role
+                WHERE id = @id";
+
+                var updateCmd = new NpgsqlCommand(query, conn);
+                updateCmd.Parameters.Add("username", 
+                    NpgsqlTypes.NpgsqlDbType.Varchar).Value = user.Username;
+                updateCmd.Parameters.Add("email", 
+                    NpgsqlTypes.NpgsqlDbType.Varchar).Value = user.Email;
+                updateCmd.Parameters.Add("phone_number", 
+                    NpgsqlTypes.NpgsqlDbType.Varchar).Value = user.PhoneNumber;
+                updateCmd.Parameters.Add("role", 
+                    NpgsqlTypes.NpgsqlDbType.Varchar).Value = user.Role;
+                updateCmd.Parameters.Add("id", 
+                    NpgsqlTypes.NpgsqlDbType.Integer).Value = user.Id;
+
+                int rowsAffected = updateCmd.ExecuteNonQuery();
+                if (rowsAffected == 0)
+                    return NotFound("User not found");
+
+                return Ok(new { 
+                    Id = user.Id, 
+                    Username = user.Username, 
+                    Email = user.Email, 
+                    PhoneNumber = user.PhoneNumber, 
+                    Role = user.Role 
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Internal server error: {ex.Message}");
+            }
+            finally
+            {
+                if (conn != null)
+                    conn.Close();
+            }
+        }
+            */
+        // POST: api/refresh_token - Refresh JWT token
+        [HttpPost("refresh_token")] 
+        public IActionResult RefreshToken()
+        {
+            return Unauthorized("JWT refresh logic goes here");
+        }
     }
 }

@@ -1,6 +1,12 @@
-@JwtAuthApi_HostAddress = http://localhost:5121
+@JwtAuthApi_HostAddress = http://localhost:5121/auth
 
-GET {{JwtAuthApi_HostAddress}}/weatherforecast/
-Accept: application/json
+POST {{JwtAuthApi_HostAddress}}/signup
+Content-Type: application/json
+#Authorization: Bearer 
+
+{
+    "Username": "test",
+    "Password": "1234"
+}
 
 ###

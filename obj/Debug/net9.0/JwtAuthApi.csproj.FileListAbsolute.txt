@@ -139,3 +139,4 @@ D:\codes\Task\JwtAuthApi\obj\Debug\net9.0\refint\JwtAuthApi.dll
 D:\codes\Task\JwtAuthApi\obj\Debug\net9.0\JwtAuthApi.pdb
 D:\codes\Task\JwtAuthApi\obj\Debug\net9.0\JwtAuthApi.genruntimeconfig.cache
 D:\codes\Task\JwtAuthApi\obj\Debug\net9.0\ref\JwtAuthApi.dll
+D:\codes\Task\JwtAuthApi\obj\Debug\net9.0\JwtAuthApi.sourcelink.json
